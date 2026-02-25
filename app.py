@@ -97,8 +97,8 @@ ating = (fat / meta_total) if (mes == 2 and meta_total and meta_total > 0) else 
 
 st.title("Toyota | Relatório CPV")
 
-c1, c2, c3, c4 = st.columns(4, gap="large")
-c5, c6, c7, c8 = st.columns(4, gap="large")
+c1, c2, c3 = st.columns(3, gap="large")
+c4, c5, c6, c7, c8 = st.columns(5, gap="large")
 c1.metric("Faturamento Total", brl(fat))
 c2.metric("NFs Emitidas", f"{notas:,}".replace(",", "."))
 c3.metric("Ticket Médio", brl(ticket))
