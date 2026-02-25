@@ -95,15 +95,16 @@ else:
 meta_total = metas["Objetivo_num"].sum() if mes == 2 else np.nan
 ating = (fat / meta_total) if (mes == 2 and meta_total and meta_total > 0) else np.nan
 
-st.title("🚗 Toyota | Dashboard Comercial")
+st.title("Toyota | Relatório CPV")
 
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+c1, c2, c3, c4 = st.columns(4, gap="large")
+c5, c6, c7, c8 = st.columns(4, gap="large")
 c1.metric("Faturamento Total", brl(fat))
-c2.metric("Total de Notas", f"{notas:,}".replace(",", "."))
+c2.metric("NFs Emitidas", f"{notas:,}".replace(",", "."))
 c3.metric("Ticket Médio", brl(ticket))
 c4.metric("Desconto Total (R$)", brl(desc_val))
-c5.metric("Desconto (%)", f"{desc_pct*100:.2f}%".replace(".", ","))
 
+c5.metric("Desconto (%)", f"{desc_pct*100:.2f}%".replace(".", ","))
 c6.metric("Meta", "—" if np.isnan(meta_total) else brl(meta_total))
 c7.metric("Atingimento", "—" if np.isnan(ating) else f"{ating*100:.1f}%".replace(".", ","))
 
