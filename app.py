@@ -30,9 +30,29 @@ df = parse_date(df, "Data")
 df["Total Nota"] = pd.to_numeric(df["Total Nota"], errors="coerce").fillna(0)
 df["Descontos por item"] = pd.to_numeric(df["Descontos por item"], errors="coerce").fillna(0)
 
+
 # =========================
 # SIDEBAR FILTROS
 # =========================
+st.sidebar.title("Referência")
+
+# Base completa (não filtrada)
+df_all = load_data()
+df_all = parse_date(df_all, "Data")
+df_all["Total Nota"] = pd.to_numeric(df_all["Total Nota"], errors="coerce").fillna(0)
+df_all["Descontos por item"] = pd.to_numeric(df_all["Descontos por item"], errors="coerce").fillna(0)
+
+# Ano/Mês disponíveis na base
+anos = sorted(df_all["Data"].dropna().dt.year.unique().tolist())
+ano = st.sidebar.selectbox("Ano", anos, index=len(anos)-1)
+
+meses = sorted(df_all[df_all["Data"].dt.year == ano]["Data"].dt.month.unique().tolist())
+mes = st.sidebar.selectbox("Mês", meses, index=len(meses)-1)
+
+# Filtra por Ano/Mês primeiro
+df = df_all[(df_all["Data"].dt.year == ano) & (df_all["Data"].dt.month == mes)].copy()
+
+st.sidebar.markdown("---")
 st.sidebar.title("Filtros")
 
 regional = st.sidebar.selectbox("Regional", ["Todos"] + sorted(df["Regional"].dropna().unique().tolist()))
@@ -56,13 +76,36 @@ ticket = fat / notas if notas else 0
 desc_val = df["Descontos por item"].sum()
 desc_pct = (desc_val / fat) if fat else 0
 
+# Meta (no seu arquivo está na aba "metas" e pelo que você disse é só Fevereiro)
+metas = pd.read_excel("dados painel.xlsx", sheet_name="metas")
+
+def parse_brl(x):
+    if pd.isna(x): 
+        return 0.0
+    s = str(x).replace("R$", "").replace(" ", "")
+    s = s.replace(".", "").replace(",", ".")
+    return pd.to_numeric(s, errors="coerce") or 0.0
+
+if "Objetivo" in metas.columns:
+    metas["Objetivo_num"] = metas["Objetivo"].apply(parse_brl)
+else:
+    metas["Objetivo_num"] = 0.0
+
+# meta total só aparece no mês 2 (fev). Nos outros meses, deixa em branco (igual você comentou)
+meta_total = metas["Objetivo_num"].sum() if mes == 2 else np.nan
+ating = (fat / meta_total) if (mes == 2 and meta_total and meta_total > 0) else np.nan
+
 st.title("🚗 Toyota | Dashboard Comercial")
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Faturamento Total", brl(fat))
 c2.metric("Total de Notas", f"{notas:,}".replace(",", "."))
 c3.metric("Ticket Médio", brl(ticket))
-c4.metric("Desconto Médio (%)", f"{desc_pct*100:.2f}%".replace(".", ","))
+c4.metric("Desconto Total (R$)", brl(desc_val))
+c5.metric("Desconto (%)", f"{desc_pct*100:.2f}%".replace(".", ","))
+
+c6.metric("Meta", "—" if np.isnan(meta_total) else brl(meta_total))
+c7.metric("Atingimento", "—" if np.isnan(ating) else f"{ating*100:.1f}%".replace(".", ","))
 
 # =========================
 # ABAS BASEADAS NOS GRÁFICOS
