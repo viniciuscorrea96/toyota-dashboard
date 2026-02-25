@@ -1,329 +1,234 @@
-
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 import streamlit as st
 import plotly.express as px
-from datetime import date
 
-st.set_page_config(page_title="Toyota | Dashboard (Python)", layout="wide")
+st.set_page_config(page_title="Toyota | Vendas", layout="wide")
 
-PAINEL_FILE_DEFAULT = "dados painel.xlsx"
-ESTOQUE_FILE_DEFAULT = "Estoque ABC - BI.xlsx"
-
-FATOR_COMPORTAMENTO = 0.20  # igual ao DAX
-
-@st.cache_data
-def load_painel(path: str):
-    xl = pd.read_excel(path, sheet_name=None)
-    sales = xl["painel toyota"].copy()
-    metas = xl["metas"].copy()
-    return sales, metas
-
-@st.cache_data
-def load_estoque(path: str):
-    xl = pd.read_excel(path, sheet_name=None)
-    est_atual = xl["Sheet1"].copy()
-    est_media = xl["estoque_media"].copy()
-    return est_atual, est_media
-
+# =========================
+# Helpers
+# =========================
 def brl(x):
     try:
         return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return str(x)
 
-def to_date(df, col):
+def parse_date_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
     if col in df.columns:
         df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
     return df
 
-# ----------------------------
-# Sidebar
-# ----------------------------
-st.sidebar.title("⚙️ Fonte de Dados")
+@st.cache_data
+def load_excel(path: str, sheet: str) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=sheet)
 
-painel_file = st.sidebar.text_input("Arquivo de Vendas (dados painel.xlsx)", PAINEL_FILE_DEFAULT)
-estoque_file = st.sidebar.text_input("Arquivo de Estoque (Estoque ABC - BI.xlsx)", ESTOQUE_FILE_DEFAULT)
+# =========================
+# Sidebar: arquivos
+# =========================
+st.sidebar.title("📂 Fonte de Dados")
+painel_path = st.sidebar.text_input("Arquivo", "dados painel.xlsx")
 
-try:
-    vendas, metas = load_painel(painel_file)
-    est_atual, est_media = load_estoque(estoque_file)
-except Exception as e:
-    st.error("Não consegui carregar os arquivos. Verifique se os nomes estão corretos e se estão na mesma pasta do app.")
-    st.exception(e)
+if not os.path.exists(painel_path):
+    st.error(f"Não achei o arquivo: {painel_path}. Confirme se ele está no repositório com esse nome.")
     st.stop()
 
-# ----------------------------
-# Preparação Vendas
-# ----------------------------
-# Coluna de data escolhida: "Data"
-vendas = to_date(vendas, "Data")
+# Carrega abas
+vendas = load_excel(painel_path, "painel toyota")
+metas = load_excel(painel_path, "metas")
 
-# Conversões numéricas (ajuste se seus nomes forem diferentes)
-for col in ["Total Nota", "Descontos por item"]:
-    if col in vendas.columns:
-        vendas[col] = pd.to_numeric(vendas[col], errors="coerce").fillna(0)
+# Tipos
+vendas = parse_date_col(vendas, "Data")
+vendas["Total Nota"] = pd.to_numeric(vendas.get("Total Nota"), errors="coerce").fillna(0)
+vendas["Descontos por item"] = pd.to_numeric(vendas.get("Descontos por item"), errors="coerce").fillna(0)
 
-# Metas (fevereiro)
-if "Objetivo" in metas.columns:
-    metas["Objetivo"] = pd.to_numeric(metas["Objetivo"], errors="coerce").fillna(0)
+metas["Objetivo"] = pd.to_numeric(metas.get("Objetivo"), errors="coerce").fillna(0)
 
-# ----------------------------
-# Mês de referência (automático) + opção de forçar fevereiro
-# ----------------------------
+# =========================
+# Default mês/ano: último mês com dado
+# =========================
+if vendas["Data"].notna().any():
+    last_date = vendas["Data"].max()
+    default_year = int(last_date.year)
+    default_month = int(last_date.month)
+else:
+    st.error("A coluna 'Data' não está sendo reconhecida como data. Verifique o formato.")
+    st.stop()
+
+# =========================
+# Sidebar: referência e filtros
+# =========================
 st.sidebar.markdown("---")
-st.sidebar.title("📅 Mês de Referência")
+st.sidebar.title("📅 Referência")
 
-hoje = date.today()
-mes_auto = hoje.month
-ano_auto = hoje.year
+years = sorted(vendas["Data"].dropna().dt.year.unique().tolist())
+year = st.sidebar.selectbox("Ano", years, index=years.index(default_year) if default_year in years else len(years)-1)
 
-forcar_fevereiro = st.sidebar.checkbox("Forçar Fevereiro (meta do mês)", value=(mes_auto != 2))
+months_avail = sorted(vendas[vendas["Data"].dt.year == year]["Data"].dt.month.unique().tolist())
+month = st.sidebar.selectbox("Mês", months_avail, index=months_avail.index(default_month) if default_month in months_avail else len(months_avail)-1)
 
-anos_disponiveis = sorted(vendas["Data"].dropna().dt.year.unique().tolist()) if "Data" in vendas.columns else [ano_auto]
-ano_ref = st.sidebar.selectbox("Ano", anos_disponiveis, index=len(anos_disponiveis)-1 if anos_disponiveis else 0)
+dfm = vendas[(vendas["Data"].dt.year == year) & (vendas["Data"].dt.month == month)].copy()
 
-mes_ref = 2 if forcar_fevereiro else st.sidebar.selectbox("Mês", list(range(1, 13)), index=max(0, min(11, mes_auto-1)))
-
-df = vendas.copy()
-if "Data" in df.columns:
-    df = df[(df["Data"].dt.year == ano_ref) & (df["Data"].dt.month == mes_ref)]
-
-# ----------------------------
-# Filtros (Regional / Unidade / Vendedor)
-# ----------------------------
 st.sidebar.markdown("---")
 st.sidebar.title("🎛️ Filtros")
 
-def add_filter(df, col, label):
+def filter_select(df, col, label):
     if col not in df.columns:
-        return df
+        return df, None
     opts = ["Todos"] + sorted(df[col].dropna().unique().tolist())
     sel = st.sidebar.selectbox(label, opts, index=0)
     if sel != "Todos":
         df = df[df[col] == sel]
-    return df
+    return df, sel
 
-df = add_filter(df, "Regional", "Regional")
-df = add_filter(df, "Unidade", "Unidade")
-df = add_filter(df, "Nome_vendedor", "Vendedor")
+dfm, regional_sel = filter_select(dfm, "Regional", "Regional")
+dfm, unidade_sel  = filter_select(dfm, "Unidade", "Unidade")
+dfm, vendedor_sel = filter_select(dfm, "Nome_vendedor", "Vendedor")
 
-# ----------------------------
-# KPIs Vendas
-# ----------------------------
-fat = df["Total Nota"].sum() if "Total Nota" in df.columns else 0
-notas = len(df)
+# =========================
+# Header + sanity check
+# =========================
+st.title("🚗 Toyota | Vendas (Python)")
+st.caption(f"Referência: {month:02d}/{year} • Linhas após filtros: {len(dfm):,}".replace(",", "."))
+
+with st.expander("🔎 Diagnóstico rápido (pra não ficar 'site estéril')", expanded=False):
+    st.write("Período total da base:", str(vendas["Data"].min().date()), "→", str(vendas["Data"].max().date()))
+    st.write("Abas carregadas: painel toyota + metas")
+    st.write("Colunas disponíveis (painel toyota):", list(vendas.columns))
+
+if dfm.empty:
+    st.warning("Sem dados para esse mês/filtros. Troque o mês/ano na lateral (o default já é o último mês com dado).")
+    st.stop()
+
+# =========================
+# KPIs
+# =========================
+fat = dfm["Total Nota"].sum()
+notas = len(dfm)
 ticket = fat / notas if notas else 0
-desc_val = df["Descontos por item"].sum() if "Descontos por item" in df.columns else 0
+desc_val = dfm["Descontos por item"].sum()
 desc_pct = (desc_val / fat) if fat else 0
 
-# Projeção por dias úteis (Seg-Sex). Se quiser feriados BR, a gente adiciona depois.
-proj = 0
-if "Data" in df.columns and df["Data"].notna().any():
-    first_day = pd.Timestamp(ano_ref, mes_ref, 1)
-    last_day = (first_day + pd.offsets.MonthEnd(0))
-    dias_uteis_total = len(pd.bdate_range(first_day, last_day))
-    data_corte = df["Data"].max().normalize()
-    dias_uteis_decorridos = len(pd.bdate_range(first_day, min(data_corte, last_day)))
-    proj = (fat / dias_uteis_decorridos) * dias_uteis_total if dias_uteis_decorridos else 0
+# Meta: usar SOMENTE se for fevereiro (sua meta atual é apenas fevereiro)
+meta_total = metas["Objetivo"].sum() if month == 2 else np.nan
+ating = (fat / meta_total) if (month == 2 and meta_total) else np.nan
+gap = (meta_total - fat) if month == 2 else np.nan
 
-meta_total = metas["Objetivo"].sum() if "Objetivo" in metas.columns else 0
-ating = (fat / meta_total) if meta_total else 0
-gap_meta = meta_total - fat
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1.metric("Faturamento (mês)", brl(fat))
+c2.metric("Notas", f"{notas:,}".replace(",", "."))
+c3.metric("Ticket Médio", brl(ticket))
+c4.metric("Desconto (R$)", brl(desc_val))
+c5.metric("Desconto (%)", f"{desc_pct*100:.2f}%".replace(".", ","))
 
-# ----------------------------
-# Header
-# ----------------------------
-st.title("🚗 Toyota | Dashboard (Python)")
-st.caption(f"Referência: {mes_ref:02d}/{ano_ref}  •  (Forçar Fevereiro = {'Sim' if forcar_fevereiro else 'Não'})")
+if month == 2:
+    c6.metric("Meta (Fev)", brl(meta_total))
+    c7, c8 = st.columns(2)
+    c7.metric("Atingimento", f"{ating*100:.1f}%".replace(".", ",") if not np.isnan(ating) else "—")
+    c8.metric("Gap (Meta - Fat)", brl(gap) if not np.isnan(gap) else "—")
+else:
+    c6.metric("Meta (Fev)", "—")
+    st.info("Meta no arquivo está apenas para Fevereiro. Selecione mês 2 para ver atingimento.")
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("💰 Faturamento (mês)", brl(fat))
-c2.metric("🧾 Notas", f"{notas:,}".replace(",", "."))
-c3.metric("🎟️ Ticket Médio", brl(ticket))
-c4.metric("🏷️ Desconto (R$)", brl(desc_val))
-c5.metric("🏷️ Desconto (%)", f"{desc_pct*100:.2f}%".replace(".", ","))
+# =========================
+# Tabs
+# =========================
+tab_exec, tab_reg, tab_uni, tab_vend = st.tabs(["Executivo", "Regional", "Unidade", "Vendedor (MTD)"])
 
-c6, c7, c8 = st.columns(3)
-c6.metric("📈 Projetado (Seg-Sex)", brl(proj))
-c7.metric("🎯 Meta (Fev)", brl(meta_total))
-c8.metric("✅ Atingimento", f"{ating*100:.1f}%".replace(".", ","))
-
-tabs = st.tabs(["Executivo", "Unidades", "Regionais", "Vendedores", "Estoque ABC"])
-
-# ----------------------------
-# Aba Executivo
-# ----------------------------
-with tabs[0]:
-    st.subheader("Evolução diária do faturamento")
-    if "Data" in df.columns and df["Data"].notna().any():
-        by_day = df.groupby(df["Data"].dt.date, as_index=False)["Total Nota"].sum()
-        fig = px.line(by_day, x="Data", y="Total Nota")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem dados para o mês/filtros selecionados.")
-
-# ----------------------------
-# Aba Unidades (com meta)
-# ----------------------------
-with tabs[1]:
-    st.subheader("Ranking por Unidade + Meta (Fev)")
-    if "Unidade" in df.columns:
-        by_unit = df.groupby(["Unidade", "Regional"], as_index=False).agg(
-            Faturamento=("Total Nota", "sum"),
-            Notas=("Total Nota", "size"),
-            Desconto=("Descontos por item", "sum"),
-        )
-        by_unit["Ticket"] = by_unit["Faturamento"] / by_unit["Notas"].replace(0, np.nan)
-
-        # Merge metas por Unidade
-        meta_u = metas.rename(columns={"Objetivo":"Meta"})
-        if "Unidade" in meta_u.columns:
-            by_unit = by_unit.merge(meta_u[["Unidade","Meta"]], on="Unidade", how="left")
-            by_unit["Meta"] = pd.to_numeric(by_unit["Meta"], errors="coerce").fillna(0)
-            by_unit["Atingimento"] = np.where(by_unit["Meta"]>0, by_unit["Faturamento"]/by_unit["Meta"], np.nan)
-            by_unit["Gap"] = by_unit["Meta"] - by_unit["Faturamento"]
-
-        by_unit = by_unit.sort_values("Faturamento", ascending=False)
-        st.dataframe(by_unit, use_container_width=True)
-
-        fig = px.bar(by_unit.head(25), x="Faturamento", y="Unidade", orientation="h", color="Regional")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Coluna 'Unidade' não encontrada.")
-
-# ----------------------------
-# Aba Regionais (com meta)
-# ----------------------------
-with tabs[2]:
-    st.subheader("Performance por Regional + Meta (Fev)")
-    if "Regional" in df.columns:
-        by_reg = df.groupby("Regional", as_index=False).agg(
-            Faturamento=("Total Nota", "sum"),
-            Notas=("Total Nota", "size"),
-            Desconto=("Descontos por item", "sum"),
-        )
-        by_reg["Ticket"] = by_reg["Faturamento"] / by_reg["Notas"].replace(0, np.nan)
-
-        if "Regional" in metas.columns and "Objetivo" in metas.columns:
-            meta_r = metas.groupby("Regional", as_index=False).agg(Meta=("Objetivo","sum"))
-            by_reg = by_reg.merge(meta_r, on="Regional", how="left").fillna({"Meta":0})
-            by_reg["Atingimento"] = np.where(by_reg["Meta"]>0, by_reg["Faturamento"]/by_reg["Meta"], np.nan)
-            by_reg["Gap"] = by_reg["Meta"] - by_reg["Faturamento"]
-
-        by_reg = by_reg.sort_values("Faturamento", ascending=False)
-        st.dataframe(by_reg, use_container_width=True)
-
-        fig = px.bar(by_reg, x="Faturamento", y="Regional", orientation="h")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Coluna 'Regional' não encontrada.")
-
-# ----------------------------
-# Aba Vendedores
-# ----------------------------
-with tabs[3]:
-    st.subheader("Ranking por Vendedor")
-    if "Nome_vendedor" in df.columns:
-        by_sell = df.groupby(["Nome_vendedor","Unidade","Regional"], as_index=False).agg(
-            Faturamento=("Total Nota","sum"),
-            Notas=("Total Nota","size"),
-            Desconto=("Descontos por item","sum"),
-        )
-        by_sell["Ticket"] = by_sell["Faturamento"] / by_sell["Notas"].replace(0, np.nan)
-        by_sell = by_sell.sort_values("Faturamento", ascending=False)
-
-        topn = st.slider("Top N", 5, 80, 20)
-        st.dataframe(by_sell.head(topn), use_container_width=True)
-
-        fig = px.bar(by_sell.head(topn), x="Faturamento", y="Nome_vendedor", orientation="h", color="Unidade")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Coluna 'Nome_vendedor' não encontrada.")
-
-# ----------------------------
-# Aba Estoque ABC + Comportamento Peça (igual DAX)
-# ----------------------------
-with tabs[4]:
-    st.subheader("Estoque ABC (atual + média) com 'Comportamento Peça'")
-
-    # Tipos numéricos
-    for c in ["Estoque","MAD"]:
-        if c in est_atual.columns:
-            est_atual[c] = pd.to_numeric(est_atual[c], errors="coerce")
-    if "media_estoque" in est_media.columns:
-        est_media["media_estoque"] = pd.to_numeric(est_media["media_estoque"], errors="coerce")
-
-    # Join pelo id_excel
-    if "id_excel" not in est_atual.columns or "id_excel" not in est_media.columns:
-        st.error("Preciso da coluna 'id_excel' em Sheet1 e em estoque_media para calcular o comportamento.")
-        st.stop()
-
-    base = est_atual.merge(est_media[["id_excel","media_estoque"]], on="id_excel", how="left")
-
-    # Implementação igual ao DAX:
-    # Limite = MAX(1, Mad*0.20)
-    base["Limite"] = np.maximum(1, base["MAD"] * FATOR_COMPORTAMENTO)
-    base["Dif"] = base["Estoque"] - base["media_estoque"]
-
-    mask_blank = base["media_estoque"].isna() | base["Estoque"].isna() | base["MAD"].isna()
-
-    base["Comportamento Peça"] = np.select(
-        [
-            ~mask_blank & (base["Dif"] >  base["Limite"]),
-            ~mask_blank & (base["Dif"] < -base["Limite"]),
-            ~mask_blank
-        ],
-        ["▲","▼","▬"],
-        default=np.nan
-    )
-
-    # Filtro rápido por comportamento
-    st.markdown("#### Filtros do Estoque")
-    colf1, colf2, colf3 = st.columns(3)
-
-    with colf1:
-        opts = ["Todos"] + [x for x in ["▲","▼","▬"] if x in base["Comportamento Peça"].dropna().unique()]
-        comp_sel = st.selectbox("Comportamento", opts, index=0)
-    with colf2:
-        curva_col = "Cód. Curva" if "Cód. Curva" in base.columns else ("Cód. Curva " if "Cód. Curva " in base.columns else None)
-        if curva_col:
-            curvas = ["Todos"] + sorted(base[curva_col].dropna().unique().tolist())
-            curva_sel = st.selectbox("Curva", curvas, index=0)
-        else:
-            curva_sel = "Todos"
-    with colf3:
-        empresa_col = "Nome da Empresa" if "Nome da Empresa" in base.columns else None
-        if empresa_col:
-            empresas = ["Todos"] + sorted(base[empresa_col].dropna().unique().tolist())
-            emp_sel = st.selectbox("Empresa", empresas, index=0)
-        else:
-            emp_sel = "Todos"
-
-    view = base.copy()
-    if comp_sel != "Todos":
-        view = view[view["Comportamento Peça"] == comp_sel]
-    if curva_sel != "Todos" and curva_col:
-        view = view[view[curva_col] == curva_sel]
-    if emp_sel != "Todos" and empresa_col:
-        view = view[view[empresa_col] == emp_sel]
-
-    # Mostra tabela
-    cols_show = []
-    for c in ["Nome da Empresa","Cód. Item","Descrição","Cód. Curva","Estoque","media_estoque","MAD","Dif","Limite","Comportamento Peça","Ação"]:
-        if c in view.columns:
-            cols_show.append(c)
-
-    st.dataframe(
-        view[cols_show].sort_values(["Comportamento Peça","Dif"], ascending=[True, False]).head(400),
-        use_container_width=True
-    )
-
-    # Gráfico: contagem por comportamento
-    st.markdown("#### Distribuição do Comportamento")
-    dist = view["Comportamento Peça"].value_counts(dropna=True).reset_index()
-    dist.columns = ["Comportamento", "Qtd Itens"]
-    fig = px.bar(dist, x="Comportamento", y="Qtd Itens")
+with tab_exec:
+    st.subheader("Faturamento diário")
+    daily = dfm.groupby(dfm["Data"].dt.date, as_index=False)["Total Nota"].sum()
+    fig = px.area(daily, x="Data", y="Total Nota")
     st.plotly_chart(fig, use_container_width=True)
 
-st.caption("Próximo passo: aplicar essa mesma lógica de 'seta' para Vendas (ex.: MTD vs MTD M-1 ou Projetado vs Meta).")
+    st.subheader("Top 20 vendedores (mês)")
+    topv = dfm.groupby("Nome_vendedor", as_index=False)["Total Nota"].sum().sort_values("Total Nota", ascending=False).head(20)
+    fig2 = px.bar(topv, x="Total Nota", y="Nome_vendedor", orientation="h")
+    st.plotly_chart(fig2, use_container_width=True)
+
+with tab_reg:
+    st.subheader("Ranking por Regional")
+    reg = dfm.groupby("Regional", as_index=False).agg(
+        Faturamento=("Total Nota", "sum"),
+        Notas=("Total Nota", "size"),
+        Desconto=("Descontos por item", "sum"),
+    )
+    reg["Ticket"] = reg["Faturamento"] / reg["Notas"].replace(0, np.nan)
+    reg = reg.sort_values("Faturamento", ascending=False)
+    st.dataframe(reg, use_container_width=True)
+    st.plotly_chart(px.bar(reg, x="Faturamento", y="Regional", orientation="h"), use_container_width=True)
+
+with tab_uni:
+    st.subheader("Ranking por Unidade")
+    uni = dfm.groupby(["Unidade", "Regional"], as_index=False).agg(
+        Faturamento=("Total Nota", "sum"),
+        Notas=("Total Nota", "size"),
+        Desconto=("Descontos por item", "sum"),
+    )
+    uni["Ticket"] = uni["Faturamento"] / uni["Notas"].replace(0, np.nan)
+    uni = uni.sort_values("Faturamento", ascending=False)
+    st.dataframe(uni, use_container_width=True)
+    st.plotly_chart(px.bar(uni.head(25), x="Faturamento", y="Unidade", orientation="h", color="Regional"), use_container_width=True)
+
+with tab_vend:
+    st.subheader("Comparativo MTD (mês atual vs mesmo período mês anterior)")
+
+    # Se o filtro do sidebar não escolheu um vendedor, deixa escolher aqui
+    vendedores = sorted(vendas["Nome_vendedor"].dropna().unique().tolist())
+    vend = vendedor_sel if (vendedor_sel and vendedor_sel != "Todos") else st.selectbox("Escolha o vendedor", vendedores)
+
+    base = vendas[vendas["Nome_vendedor"] == vend].copy()
+
+    # mês atual
+    cur = base[(base["Data"].dt.year == year) & (base["Data"].dt.month == month)].copy()
+    if cur.empty:
+        st.warning("Esse vendedor não tem vendas no mês selecionado.")
+        st.stop()
+
+    corte = int(cur["dia_mes"].max())  # mesmo comportamento do BI: até o dia com dado
+    fat_atual = cur[cur["dia_mes"] <= corte]["Total Nota"].sum()
+
+    # mês anterior
+    if month == 1:
+        prev_year, prev_month = year - 1, 12
+    else:
+        prev_year, prev_month = year, month - 1
+
+    prev = base[(base["Data"].dt.year == prev_year) & (base["Data"].dt.month == prev_month) & (base["dia_mes"] <= corte)].copy()
+    fat_prev = prev["Total Nota"].sum()
+
+    desvio_rs = fat_atual - fat_prev
+    desvio_pct = (fat_atual / fat_prev - 1) if fat_prev else np.nan
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Faturamento Atual", brl(fat_atual))
+    c2.metric("Mesmo período mês anterior", brl(fat_prev))
+    c3.metric("(R$) Desvio", brl(desvio_rs))
+    c4.metric("% Desvio", "—" if np.isnan(desvio_pct) else f"{desvio_pct*100:.2f}%".replace(".", ","))
+
+    st.markdown("#### MTD acumulado por dia_mes")
+    cur_d = cur.groupby("dia_mes", as_index=False)["Total Nota"].sum().sort_values("dia_mes")
+    cur_d["MTD"] = cur_d["Total Nota"].cumsum()
+    cur_d["Mês"] = f"{month:02d}/{year}"
+
+    prev_full = base[(base["Data"].dt.year == prev_year) & (base["Data"].dt.month == prev_month)].copy()
+    prev_d = prev_full.groupby("dia_mes", as_index=False)["Total Nota"].sum().sort_values("dia_mes")
+    prev_d = prev_d[prev_d["dia_mes"] <= corte]
+    prev_d["MTD"] = prev_d["Total Nota"].cumsum()
+    prev_d["Mês"] = f"{prev_month:02d}/{prev_year}"
+
+    mtd_plot = pd.concat([cur_d[["dia_mes","MTD","Mês"]], prev_d[["dia_mes","MTD","Mês"]]], ignore_index=True)
+    st.plotly_chart(px.area(mtd_plot, x="dia_mes", y="MTD", color="Mês"), use_container_width=True)
+
+    st.markdown("#### Diário por dia_mes")
+    cur_day = cur.groupby("dia_mes", as_index=False)["Total Nota"].sum()
+    cur_day["Mês"] = f"{month:02d}/{year}"
+
+    prev_day = prev_full.groupby("dia_mes", as_index=False)["Total Nota"].sum()
+    prev_day = prev_day[prev_day["dia_mes"] <= corte]
+    prev_day["Mês"] = f"{prev_month:02d}/{prev_year}"
+
+    day_plot = pd.concat([cur_day, prev_day], ignore_index=True)
+    st.plotly_chart(px.area(day_plot, x="dia_mes", y="Total Nota", color="Mês"), use_container_width=True)
+
